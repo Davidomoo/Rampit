@@ -1,10 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import WalletAgent from "@/components/WalletAgent";
 import { useAuth } from "@/lib/AuthContext";
 import { useUsdNgnRate } from "@/hooks/useApi";
 import { api } from "@/lib/api";
 import type { RampNetwork } from "@/lib/api/types";
+
 
 // ── Types ────────────────────────────────────────────────────────────────────
 type Token      = "USDT" | "USDC" | "CELO" | "SOL" | "XLM";
@@ -855,6 +857,8 @@ export default function BuyForm() {
                     </button>
                   </div>
                   <FieldError id="wallet-error" message={walletError} show={!!walletError} />
+                  <WalletAgent address={wallet} network={network} />
+
                 </div>
 
                 {/* Saved wallets picker modal */}

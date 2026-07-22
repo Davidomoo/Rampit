@@ -20,8 +20,6 @@ Rampit is a peer-to-peer crypto onramp built for Africa. It lets users in Nigeri
 - [KYC & Compliance](#kyc--compliance)
 - [Security](#security)
 
-- bnbnbn
-
 ---
 
 ## Overview
@@ -169,7 +167,11 @@ Once the fiat transfer is confirmed, Rampit releases the crypto directly to the 
 | UI Components | React 19 — all custom, no component library |
 | Icons | Custom inline SVGs + country/crypto PNG/SVG assets |
 | State Management | React Context (`AuthContext`) |
-| Auth | Email + OTP (mock implementation, ready for backend integration) |
+| Auth | Email + OTP via Fastify backend + Resend |
+| Blockchain (EVM) | [viem](https://viem.sh/) — Celo, Base, BNB Chain |
+| Blockchain (Stellar) | [@stellar/stellar-sdk](https://stellar.github.io/js-stellar-sdk/) — Soroban smart contracts |
+| Smart Contracts | RampitEscrow v2 (EVM proxy) + Soroban escrow (Stellar) |
+| AI Agent | Celo Wallet Validation Agent — live on-chain via `forno.celo.org` |
 
 ---
 
@@ -243,18 +245,45 @@ public/
 
 ---
 
+## Celo AI Wallet Agent
+
+Rampit includes a live AI agent powered by the **Celo blockchain** that validates wallet addresses in real time as the user types.
+
+### How it works
+- Triggers automatically on the wallet address input field for all supported networks
+- Makes **read-only RPC calls** to `https://forno.celo.org` (Celo's official public mainnet RPC)
+- Uses `eth_getTransactionCount` and `eth_getCode` — **zero gas, no transactions, no wallet required**
+- Detects: active wallets, empty accounts, smart contracts, and invalid address formats
+- For non-EVM networks (TRC-20, Solana, Stellar) — performs strict regex format validation
+
+### What it detects
+| Result | Meaning |
+|--------|---------|
+| ✅ Active wallet | Address has on-chain activity on Celo |
+| ⚠️ Empty account | Valid format but no Celo activity — user warned to double-check |
+| ⚠️ Smart contract | Address is a contract — user warned to verify it accepts tokens |
+| ✅ Format valid | Non-EVM address passes regex check (format-only, no on-chain lookup) |
+| ❌ Invalid format | Address doesn't match network pattern |
+
+### Key files
+| File | Role |
+|------|------|
+| `src/app/api/agent/validate-wallet/route.ts` | Server-side agent — queries Celo RPC via viem |
+| `src/components/WalletAgent.tsx` | Client UI — debounced, real-time feedback below wallet input |
+| `src/lib/evm/client.ts` | Shared viem client used by agent + escrow |
+
+---
+
 ## Environment & Configuration
 
-The current implementation uses mock data and simulated async delays to represent backend behaviour. The following areas are ready for real backend integration:
-
-| Feature | Current State | Integration Point |
-|---------|--------------|-------------------|
-| OTP sending | Simulated 800ms delay | Replace `mockSendOtp` in `AuthModal.tsx` |
-| OTP verification | Any 6-digit code passes | Replace `mockVerifyOtp` in `AuthModal.tsx` |
-| Exchange rates | Hardcoded USD rates | Fetch from a rates API |
-| Order creation | Mock order objects | POST to orders API |
-| Payment confirmation | Simulated 3s delay | Webhook from payment processor |
-| KYC verification | Simulated 1.4s delay | Integrate identity verification provider |
+| Feature | Status |
+|---------|--------|
+| OTP auth | Live via Fastify backend + Resend SMTP |
+| Exchange rates | Hardcoded — replace with live rates API |
+| Escrow (EVM) | Live — RampitEscrow v2 on Celo, Base, BNB |
+| Escrow (Stellar) | Live — Soroban contract on Stellar mainnet |
+| Payment confirmation | Needs webhook from bank/payment processor |
+| KYC verification | Simulated — integrate identity provider |
 
 ---
 

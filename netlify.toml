@@ -1,6 +1,6 @@
-# Full Next.js on Netlify (server actions + API routes). Do not use publish = "out".
 [build]
   command = "npm run build"
+  publish = ".next"
 
 [build.environment]
   NODE_VERSION = "20"
