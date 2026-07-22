@@ -5,11 +5,13 @@ import { useAuth } from "@/lib/AuthContext";
 import Link from "next/link";
 
 export default function SettingsPage() {
-  const { user, setUser, savedWallets, setSavedWallets } = useAuth();
+  const { user, savedWallets, setSavedWallets, deleteAccount } = useAuth();
   const [emailNotifs, setEmailNotifs] = useState(true);
   const wallets = savedWallets;
   const [addOpen, setAddOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [newWallet, setNewWallet] = useState({ network: "TRC-20", address: "", memo: "", label: "" });
 
   function addWallet() {
@@ -23,9 +25,17 @@ export default function SettingsPage() {
     setSavedWallets(wallets.filter((_, i) => i !== idx));
   }
 
-  function confirmDelete() {
-    setUser(null);
-    setDeleteOpen(false);
+  /** DELETE /users/me — soft-deletes the account and drops the session. */
+  async function confirmDelete() {
+    setDeleting(true); setDeleteError("");
+    try {
+      await deleteAccount();
+      setDeleteOpen(false);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Could not delete your account");
+    } finally {
+      setDeleting(false);
+    }
   }
 
   return (
@@ -220,16 +230,19 @@ export default function SettingsPage() {
                 This action cannot be undone. All your data will be permanently removed.
               </p>
             </div>
+            {deleteError && (
+              <p role="alert" style={{ fontFamily: "var(--font-body)", fontSize: "12px", color: "var(--error)" }}>{deleteError}</p>
+            )}
             <div className="flex gap-2">
-              <button onClick={() => setDeleteOpen(false)}
+              <button onClick={() => setDeleteOpen(false)} disabled={deleting}
                 className="flex-1 px-4 py-3 rounded-xl transition-colors duration-200"
                 style={{ background: "var(--bg-tertiary)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontFamily: "var(--font-body)", fontSize: "14px", fontWeight: 600, cursor: "pointer" }}>
                 Cancel
               </button>
-              <button onClick={confirmDelete}
+              <button onClick={confirmDelete} disabled={deleting}
                 className="flex-1 px-4 py-3 rounded-xl transition-colors duration-200"
                 style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", color: "var(--error)", fontFamily: "var(--font-body)", fontSize: "14px", fontWeight: 600, cursor: "pointer" }}>
-                Delete
+                {deleting ? "Deleting…" : "Delete"}
               </button>
             </div>
           </div>

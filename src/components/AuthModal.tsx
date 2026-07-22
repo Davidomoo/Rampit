@@ -1,44 +1,21 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { api } from "@/lib/api";
 
 type AuthStep = "email" | "otp";
 
 const OTP_LENGTH = 6;
 const RESEND_COOLDOWN = 30;
 
-async function makeApiRequest(endpoint: string, body: Record<string, unknown>) {
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.message || payload?.error || "Request failed");
-  }
-  return payload;
-}
-
+/** POST /auth/login — the backend creates the account on first request. */
 async function sendOtp(email: string): Promise<void> {
-  const payload = await makeApiRequest("/api/auth/login", { email });
-  if (!payload?.success) {
-    throw new Error(payload?.message || "Failed to send code");
-  }
+  await api.auth.sendOtp(email);
 }
 
-async function verifyOtp(email: string, code: string): Promise<boolean> {
-  const payload = await makeApiRequest("/api/auth/login/verify", { email, otp: code });
-  const accessToken = payload?.data?.access_token;
-  const refreshToken = payload?.data?.refresh_token;
-  if (!accessToken || !refreshToken) {
-    throw new Error("Authentication response missing tokens");
-  }
-
-  localStorage.setItem("rampit_access_token", accessToken);
-  localStorage.setItem("rampit_refresh_token", refreshToken);
-  return true;
+/** POST /auth/login/verify — the client stores the returned tokens. */
+async function verifyOtp(email: string, code: string): Promise<void> {
+  await api.auth.verifyOtp(email, code);
 }
 
 export default function AuthModal({

@@ -1,23 +1,72 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useAuth, KycStatus } from "@/lib/AuthContext";
+import { api } from "@/lib/api";
 
 export default function ProfilePage() {
-  const { user, orders, kycStatus, setKycOpen } = useAuth();
+  const { user, profile, orders, kycStatus, setKycOpen, bankAccount, refreshProfile, refreshBankAccount } = useAuth();
   const [editing, setEditing]   = useState(false);
-  const [name, setName]         = useState("Alex Johnson");
-  const [phone, setPhone]       = useState("+234 800 000 0000");
-  const [country, setCountry]   = useState("Nigeria");
-  const [draft, setDraft]       = useState({ name, phone, country });
+  const [draft, setDraft]       = useState({ name: "", phone: "", country: "" });
+  const [saving, setSaving]     = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [provisioning, setProvisioning] = useState(false);
+
+  // Everything below comes from GET /users/me.
+  const name = [profile?.firstname, profile?.lastname].filter(Boolean).join(" ") || "—";
+  const phone = profile?.phone ?? "—";
+  const country = profile?.country ?? "—";
 
   const completed = orders.filter((o) => o.status === "completed").length;
   const totalVol  = orders.filter((o) => o.status === "completed").reduce((s, o) => s + o.fiatAmount, 0);
   const initials  = user ? user.slice(0, 2).toUpperCase() : "?";
-  const joined    = "May 2026";
+  const joined    = profile
+    ? new Date(profile.created_at).toLocaleDateString("en-GB", { month: "long", year: "numeric" })
+    : "—";
 
-  function save() { setName(draft.name); setPhone(draft.phone); setCountry(draft.country); setEditing(false); }
+  useEffect(() => {
+    if (!editing && profile) {
+      setDraft({
+        name: [profile.firstname, profile.lastname].filter(Boolean).join(" "),
+        phone: profile.phone ?? "",
+        country: profile.country ?? "",
+      });
+    }
+  }, [editing, profile]);
+
+  /** PATCH /users/me */
+  async function save() {
+    setSaving(true); setSaveError("");
+    const [firstname, ...rest] = draft.name.trim().split(/\s+/);
+    try {
+      await api.users.updateMe({
+        ...(firstname ? { firstname } : {}),
+        ...(rest.length ? { lastname: rest.join(" ") } : {}),
+        ...(draft.phone.trim() ? { phone: draft.phone.trim() } : {}),
+        ...(draft.country.trim() ? { country: draft.country.trim() } : {}),
+      });
+      await refreshProfile();
+      setEditing(false);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Could not save your profile");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** POST /users/me/bank-account — needs a phone number and, on SafeHaven, a verified ID. */
+  async function provisionAccount() {
+    setProvisioning(true);
+    try {
+      await api.users.provisionBankAccount({});
+      await refreshBankAccount();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Could not create your bank account");
+    } finally {
+      setProvisioning(false);
+    }
+  }
 
   const KYC_BADGE: Record<KycStatus, React.ReactNode> = {
     unverified: (
@@ -93,7 +142,7 @@ export default function ProfilePage() {
               <span style={{ fontFamily: "var(--font-body)", fontSize: "12px", color: "var(--text-tertiary)" }}>Joined {joined}</span>
             </div>
           </div>
-          <button onClick={() => { setDraft({ name, phone, country }); setEditing(true); }}
+          <button onClick={() => setEditing(true)}
             className="px-3 py-2 rounded-xl transition-colors duration-150 flex-shrink-0"
             style={{ background: "var(--bg-tertiary)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontFamily: "var(--font-body)", fontSize: "12px", fontWeight: 600, cursor: "pointer" }}>
             Edit
@@ -127,6 +176,21 @@ export default function ProfilePage() {
             ["Phone",        phone],
             ["Country",      country],
             ["Member Since", joined],
+            ["Bank Account", bankAccount ? (
+              <span key="acct" style={{ fontFamily: "var(--font-mono)" }}>
+                {bankAccount.account_number}
+                {typeof bankAccount.accountBalance === "number" && (
+                  <span style={{ color: "var(--text-tertiary)", fontWeight: 400 }}>
+                    {" "}· ₦{bankAccount.accountBalance.toLocaleString()}
+                  </span>
+                )}
+              </span>
+            ) : (
+              <button key="provision" onClick={provisionAccount} disabled={provisioning}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--accent)", fontFamily: "var(--font-body)", fontSize: "13px", fontWeight: 600, textDecoration: "underline", padding: 0 }}>
+                {provisioning ? "Creating…" : "Create account"}
+              </button>
+            )],
             ["KYC Status",   KYC_BADGE[kycStatus]],
           ] as [string, React.ReactNode][]).map(([label, value], i, arr) => (
             <div key={label} className="flex items-center justify-between px-5 py-3.5"
@@ -156,13 +220,18 @@ export default function ProfilePage() {
                   className="input-dark w-full rounded-xl px-4 py-3" style={{ fontSize: "13px" }} />
               </div>
             ))}
+            {saveError && (
+              <p role="alert" style={{ fontFamily: "var(--font-body)", fontSize: "12px", color: "var(--error)" }}>{saveError}</p>
+            )}
             <div className="flex gap-2 pt-1">
-              <button onClick={() => setEditing(false)}
+              <button onClick={() => setEditing(false)} disabled={saving}
                 className="flex-1 py-3 rounded-xl"
                 style={{ background: "var(--bg-tertiary)", border: "1px solid var(--border)", color: "var(--text-secondary)", fontFamily: "var(--font-body)", fontSize: "14px", fontWeight: 600, cursor: "pointer" }}>
                 Cancel
               </button>
-              <button onClick={save} className="btn-gold flex-1 rounded-xl py-3 text-sm">Save</button>
+              <button onClick={save} disabled={saving} className="btn-gold flex-1 rounded-xl py-3 text-sm">
+                {saving ? "Saving…" : "Save"}
+              </button>
             </div>
           </div>
         </div>

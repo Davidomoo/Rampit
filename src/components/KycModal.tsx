@@ -1,27 +1,72 @@
 "use client";
 
 import { useState } from "react";
-import { useAuth, KycStatus } from "@/lib/AuthContext";
+import { useAuth } from "@/lib/AuthContext";
+import { api } from "@/lib/api";
 
 type IdType = "bvn" | "nin";
+type Stage = "details" | "otp";
 
 export default function KycModal() {
-  const { kycOpen, setKycOpen, setKycStatus } = useAuth();
+  const { kycOpen, setKycOpen, setKycStatus, refreshProfile } = useAuth();
+  const [stage, setStage]       = useState<Stage>("details");
   const [idType, setIdType]     = useState<IdType>("bvn");
   const [idNumber, setIdNumber] = useState("");
   const [dob, setDob]           = useState("");
+  const [otp, setOtp]           = useState("");
+  const [identityId, setIdentityId] = useState("");
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState("");
 
-  async function submit() {
+  /** Step 1 — POST /users/me/kyc/start; an OTP goes to the identity holder. */
+  async function startVerification() {
     if (!idNumber.trim() || !dob) { setError("All fields are required"); return; }
     if (!/^\d{11}$/.test(idNumber)) { setError(`${idType.toUpperCase()} must be exactly 11 digits`); return; }
     setError(""); setLoading(true);
-    await new Promise((r) => setTimeout(r, 1400));
-    setLoading(false);
-    setKycStatus("pending" as KycStatus);
-    setKycOpen(false);
-    setIdNumber(""); setDob("");
+    try {
+      // Keep the profile's date of birth in sync while we have it.
+      await api.users.updateMe({ dob }).catch(() => {});
+      const result = await api.users.startKyc({
+        type: idType.toUpperCase() as "BVN" | "NIN",
+        number: idNumber,
+      });
+      setIdentityId(result.identityId);
+      setStage("otp");
+      setKycStatus("pending");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start verification");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /** Step 2 — POST /users/me/kyc/complete; on success the profile is stamped. */
+  async function completeVerification() {
+    if (otp.trim().length < 4) { setError("Enter the code sent to your phone"); return; }
+    setError(""); setLoading(true);
+    try {
+      const result = await api.users.completeKyc({
+        identityId,
+        type: idType.toUpperCase() as "BVN" | "NIN",
+        otp: otp.trim(),
+      });
+      if (result.status !== "VERIFIED") {
+        setError("Verification is still pending. Try again shortly.");
+        return;
+      }
+      await refreshProfile();
+      setKycStatus("verified");
+      reset();
+      setKycOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Verification failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function reset() {
+    setStage("details"); setIdNumber(""); setDob(""); setOtp(""); setIdentityId(""); setError("");
   }
 
   function close() { setKycOpen(false); setError(""); }
@@ -58,6 +103,41 @@ export default function KycModal() {
         </div>
 
         <div className="px-6 pb-6 pt-4 space-y-4">
+          {stage === "otp" ? (
+            <>
+              <div className="px-3 py-3 rounded-xl" style={{ background: "var(--accent-muted)", border: "1px solid var(--border-accent)" }}>
+                <p style={{ fontFamily: "var(--font-body)", fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                  We sent a one-time code to the phone number registered to this{" "}
+                  <span style={{ fontWeight: 700, color: "var(--accent)" }}>{idType.toUpperCase()}</span>. Enter it below to finish verification.
+                </p>
+              </div>
+
+              <div>
+                <label style={{ fontFamily: "var(--font-body)", fontSize: "13px", fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: "6px" }}>
+                  Verification Code
+                </label>
+                <input type="text" inputMode="numeric" maxLength={8} placeholder="Enter the code"
+                  value={otp} onChange={(e) => { setOtp(e.target.value.replace(/\D/g, "")); setError(""); }}
+                  className="input-dark w-full rounded-xl px-4 py-3"
+                  style={{ fontSize: "18px", fontFamily: "var(--font-mono)", letterSpacing: "0.3em", textAlign: "center" }} />
+              </div>
+
+              {error && <p role="alert" style={{ fontFamily: "var(--font-body)", fontSize: "12px", color: "var(--error)" }}>{error}</p>}
+
+              <button type="button" onClick={completeVerification} disabled={loading || otp.length < 4}
+                className="btn-gold w-full rounded-2xl py-4 text-base font-bold flex items-center justify-center gap-2">
+                {loading
+                  ? <><svg className="animate-spin" width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="currentColor" strokeOpacity="0.3" strokeWidth="2"/><path d="M9 2a7 7 0 0 1 7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>Verifying…</>
+                  : "Complete Verification →"}
+              </button>
+
+              <button type="button" onClick={reset}
+                className="w-full text-center" style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "var(--font-body)", fontSize: "12px", color: "var(--text-tertiary)" }}>
+                Use a different ID
+              </button>
+            </>
+          ) : (
+          <>
           {/* ID type toggle */}
           <div>
             <label style={{ fontFamily: "var(--font-body)", fontSize: "13px", fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: "8px" }}>ID Type</label>
@@ -117,12 +197,14 @@ export default function KycModal() {
             </p>
           </div>
 
-          <button type="button" onClick={submit} disabled={loading || !idNumber || !dob}
+          <button type="button" onClick={startVerification} disabled={loading || !idNumber || !dob}
             className="btn-gold w-full rounded-2xl py-4 text-base font-bold flex items-center justify-center gap-2">
             {loading
-              ? <><svg className="animate-spin" width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="currentColor" strokeOpacity="0.3" strokeWidth="2"/><path d="M9 2a7 7 0 0 1 7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>Verifying…</>
-              : "Submit for Verification →"}
+              ? <><svg className="animate-spin" width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="currentColor" strokeOpacity="0.3" strokeWidth="2"/><path d="M9 2a7 7 0 0 1 7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>Sending code…</>
+              : "Send Verification Code →"}
           </button>
+          </>
+          )}
         </div>
       </div>
     </div>

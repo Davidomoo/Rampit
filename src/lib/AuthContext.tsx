@@ -1,6 +1,8 @@
 "use client";
 
-import { createContext, useContext, useState, ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from "react";
+import { api, isAuthenticated } from "@/lib/api";
+import type { BankAccount, RampTransaction, User } from "@/lib/api/types";
 
 export type SavedWallet = { network: string; address: string; memo?: string; label?: string };
 
@@ -22,64 +24,221 @@ export type Order = {
   status: OrderStatus;
 };
 
-function makeOrder(overrides: Partial<Order> & Pick<Order, "id" | "ref" | "date" | "status">): Order {
+export type KycStatus = "unverified" | "pending" | "verified";
+
+const SAVED_WALLETS_KEY = "rampit_saved_wallets";
+
+function toOrderStatus(status: string): OrderStatus {
+  if (status === "COMPLETED") return "completed";
+  if (status === "FAILED" || status === "CANCELLED") return "failed";
+  return "pending";
+}
+
+/** Map a backend ramp transaction onto the shape the history/dashboard UI reads. */
+function toOrder(tx: RampTransaction, kind: "onramp" | "offramp"): Order {
+  const cryptoAmount = tx.tokenAmount ?? "—";
+  const rate =
+    tx.tokenAmount && Number(tx.tokenAmount) > 0 ? tx.amount / Number(tx.tokenAmount) : 0;
+
   return {
-    txHash: "0x" + Math.random().toString(16).slice(2, 18) + Math.random().toString(16).slice(2, 18),
-    fiatAmount: 25000, fiatCurrency: "NGN", fiatSymbol: "₦",
-    cryptoAmount: "15.12", token: "USDT", network: "TRC-20",
-    rate: 1620, wallet: "TXYZabc123456789012345678901234567",
-    ...overrides,
+    id: tx.id,
+    ref: tx.reference,
+    txHash: tx.transactionHash ?? "",
+    date: tx.createdAt,
+    fiatAmount: tx.amount,
+    fiatCurrency: "NGN",
+    fiatSymbol: "₦",
+    cryptoAmount,
+    token: tx.tokenType ?? "USDC",
+    network: tx.network ?? (kind === "onramp" ? "Base" : "—"),
+    rate,
+    wallet: tx.destinationAddress ?? "",
+    status: toOrderStatus(tx.status),
   };
 }
 
-export const MOCK_ORDERS: Order[] = [
-  makeOrder({ id: "1", ref: "RMP-001", date: "2026-05-13T09:15:00Z", status: "completed", fiatAmount: 50000, cryptoAmount: "30.25", token: "USDT", network: "TRC-20" }),
-  makeOrder({ id: "2", ref: "RMP-002", date: "2026-05-12T14:30:00Z", status: "completed", fiatAmount: 20000, fiatCurrency: "GHS", fiatSymbol: "₵", cryptoAmount: "1.28", token: "SOL", network: "Solana", rate: 15.4 }),
-  makeOrder({ id: "3", ref: "RMP-003", date: "2026-05-11T08:00:00Z", status: "failed",    fiatAmount: 15000, cryptoAmount: "9.07", token: "USDC", network: "ERC-20" }),
-  makeOrder({ id: "4", ref: "RMP-004", date: "2026-05-10T17:45:00Z", status: "completed", fiatAmount: 80000, cryptoAmount: "48.40", token: "USDT", network: "BEP-20" }),
-  makeOrder({ id: "5", ref: "RMP-005", date: "2026-05-09T11:20:00Z", status: "pending",   fiatAmount: 30000, cryptoAmount: "18.15", token: "USDT", network: "TRC-20" }),
-  makeOrder({ id: "6", ref: "RMP-006", date: "2026-05-08T06:55:00Z", status: "completed", fiatAmount: 10000, fiatCurrency: "KES", fiatSymbol: "KSh", cryptoAmount: "76.92", token: "XLM", network: "Stellar", memo: "123456", rate: 130 }),
-  makeOrder({ id: "7", ref: "RMP-007", date: "2026-05-07T20:10:00Z", status: "completed", fiatAmount: 45000, cryptoAmount: "27.22", token: "USDT", network: "TRC-20" }),
-  makeOrder({ id: "8", ref: "RMP-008", date: "2026-05-06T13:00:00Z", status: "failed",    fiatAmount: 12000, cryptoAmount: "7.26", token: "USDC", network: "BEP-20" }),
-  makeOrder({ id: "9", ref: "RMP-009", date: "2026-05-05T09:30:00Z", status: "completed", fiatAmount: 60000, cryptoAmount: "36.30", token: "USDT", network: "ERC-20" }),
-  makeOrder({ id: "10", ref: "RMP-010", date: "2026-05-04T16:00:00Z", status: "completed", fiatAmount: 35000, cryptoAmount: "21.18", token: "USDT", network: "TRC-20" }),
-  makeOrder({ id: "11", ref: "RMP-011", date: "2026-05-03T10:45:00Z", status: "pending",   fiatAmount: 22000, cryptoAmount: "13.31", token: "USDC", network: "ERC-20" }),
-  makeOrder({ id: "12", ref: "RMP-012", date: "2026-05-02T07:20:00Z", status: "completed", fiatAmount: 90000, cryptoAmount: "54.45", token: "USDT", network: "BEP-20" }),
-];
-
-export type KycStatus = "unverified" | "pending" | "verified";
+/** KYC is verified once AutoRamp has stamped a BVN or NIN on the profile. */
+function deriveKycStatus(profile: User | null, pending: boolean): KycStatus {
+  if (!profile) return "unverified";
+  if (profile.bvn_verified_at || profile.nin_verified_at) return "verified";
+  return pending ? "pending" : "unverified";
+}
 
 type AuthCtx = {
+  /** Signed-in user's email, or null. */
   user: string | null;
   setUser: (u: string | null) => void;
+  /** Full profile from GET /users/me. */
+  profile: User | null;
+  loadingProfile: boolean;
+  refreshProfile: () => Promise<void>;
+  /** The user's AutoRamp NGN account, when provisioned. */
+  bankAccount: BankAccount | null;
+  refreshBankAccount: () => Promise<void>;
   authOpen: boolean;
   setAuthOpen: (o: boolean) => void;
   savedWallets: SavedWallet[];
   setSavedWallets: (w: SavedWallet[]) => void;
+  /** Ramp history from GET /autoramp/ramp/transactions. */
   orders: Order[];
+  loadingOrders: boolean;
+  refreshOrders: () => Promise<void>;
   kycStatus: KycStatus;
   setKycStatus: (s: KycStatus) => void;
   kycOpen: boolean;
   setKycOpen: (o: boolean) => void;
+  logout: () => Promise<void>;
+  deleteAccount: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthCtx>({
-  user: null, setUser: () => {}, authOpen: false, setAuthOpen: () => {},
-  savedWallets: [], setSavedWallets: () => {}, orders: [],
+  user: null, setUser: () => {}, profile: null, loadingProfile: false,
+  refreshProfile: async () => {}, bankAccount: null, refreshBankAccount: async () => {},
+  authOpen: false, setAuthOpen: () => {}, savedWallets: [], setSavedWallets: () => {},
+  orders: [], loadingOrders: false, refreshOrders: async () => {},
   kycStatus: "unverified", setKycStatus: () => {}, kycOpen: false, setKycOpen: () => {},
+  logout: async () => {}, deleteAccount: async () => {},
 });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser]               = useState<string | null>(null);
-  const [authOpen, setAuthOpen]       = useState(false);
-  const [kycStatus, setKycStatus]     = useState<KycStatus>("unverified");
-  const [kycOpen, setKycOpen]         = useState(false);
-  const [savedWallets, setSavedWallets] = useState<SavedWallet[]>([
-    { network: "TRC-20", address: "TXYZabc123456789012345678901234567", label: "My Tron Wallet" },
-    { network: "Stellar", address: "GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOPQR", memo: "123456", label: "Stellar Main" },
-  ]);
+  const [user, setUser]                 = useState<string | null>(null);
+  const [profile, setProfile]           = useState<User | null>(null);
+  const [loadingProfile, setLoading]    = useState(false);
+  const [bankAccount, setBankAccount]   = useState<BankAccount | null>(null);
+  const [orders, setOrders]             = useState<Order[]>([]);
+  const [loadingOrders, setLoadingOrders] = useState(false);
+  const [authOpen, setAuthOpen]         = useState(false);
+  const [kycOverride, setKycOverride]   = useState<KycStatus | null>(null);
+  const [kycPending, setKycPending]     = useState(false);
+  const [kycOpen, setKycOpen]           = useState(false);
+  const [savedWallets, setSavedWalletsState] = useState<SavedWallet[]>([]);
+
+  // Saved wallets stay client-side — the backend has no endpoint for them yet.
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(SAVED_WALLETS_KEY);
+      if (stored) setSavedWalletsState(JSON.parse(stored));
+    } catch {}
+  }, []);
+
+  const setSavedWallets = useCallback((wallets: SavedWallet[]) => {
+    setSavedWalletsState(wallets);
+    try {
+      localStorage.setItem(SAVED_WALLETS_KEY, JSON.stringify(wallets));
+    } catch {}
+  }, []);
+
+  const refreshProfile = useCallback(async () => {
+    if (!isAuthenticated()) {
+      setProfile(null);
+      setUser(null);
+      return;
+    }
+    setLoading(true);
+    try {
+      const me = await api.users.me();
+      setProfile(me);
+      setUser(me.email);
+    } catch {
+      // Token expired or revoked — fall back to signed-out.
+      setProfile(null);
+      setUser(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const refreshBankAccount = useCallback(async () => {
+    if (!isAuthenticated()) { setBankAccount(null); return; }
+    try {
+      setBankAccount(await api.users.bankAccount());
+    } catch {
+      setBankAccount(null); // 404 → not provisioned yet
+    }
+  }, []);
+
+  const refreshOrders = useCallback(async () => {
+    if (!isAuthenticated()) { setOrders([]); return; }
+    setLoadingOrders(true);
+    try {
+      const tx = await api.autoramp.transactions({ limit: 50 });
+      const mapped = [
+        ...(tx.onramp ?? []).map((t) => toOrder(t, "onramp")),
+        ...(tx.offramp ?? []).map((t) => toOrder(t, "offramp")),
+      ].sort((a, b) => b.date.localeCompare(a.date));
+      setOrders(mapped);
+    } catch {
+      setOrders([]);
+    } finally {
+      setLoadingOrders(false);
+    }
+  }, []);
+
+  const refreshKycPending = useCallback(async () => {
+    if (!isAuthenticated()) { setKycPending(false); return; }
+    try {
+      const history = await api.users.kycHistory();
+      setKycPending(history.some((record) => record.status === "PENDING"));
+    } catch {
+      setKycPending(false);
+    }
+  }, []);
+
+  // Restore the session on mount and whenever the signed-in email changes.
+  useEffect(() => {
+    void refreshProfile();
+  }, [refreshProfile]);
+
+  useEffect(() => {
+    if (!user) {
+      setOrders([]);
+      setBankAccount(null);
+      setKycPending(false);
+      return;
+    }
+    void refreshOrders();
+    void refreshBankAccount();
+    void refreshKycPending();
+  }, [user, refreshOrders, refreshBankAccount, refreshKycPending]);
+
+  const logout = useCallback(async () => {
+    await api.auth.logout().catch(() => {});
+    setUser(null);
+    setProfile(null);
+    setBankAccount(null);
+    setOrders([]);
+    setKycOverride(null);
+  }, []);
+
+  const deleteAccount = useCallback(async () => {
+    await api.users.deleteMe();
+    setUser(null);
+    setProfile(null);
+    setBankAccount(null);
+    setOrders([]);
+  }, []);
+
+  const kycStatus = useMemo(
+    () => kycOverride ?? deriveKycStatus(profile, kycPending),
+    [kycOverride, profile, kycPending],
+  );
+
+  // A component that just submitted KYC can optimistically flip the badge;
+  // the next profile refresh takes over.
+  const setKycStatus = useCallback((status: KycStatus) => {
+    setKycOverride(status);
+    void refreshProfile();
+  }, [refreshProfile]);
+
   return (
-    <AuthContext.Provider value={{ user, setUser, authOpen, setAuthOpen, savedWallets, setSavedWallets, orders: MOCK_ORDERS, kycStatus, setKycStatus, kycOpen, setKycOpen }}>
+    <AuthContext.Provider value={{
+      user, setUser, profile, loadingProfile, refreshProfile,
+      bankAccount, refreshBankAccount,
+      authOpen, setAuthOpen, savedWallets, setSavedWallets,
+      orders, loadingOrders, refreshOrders,
+      kycStatus, setKycStatus, kycOpen, setKycOpen,
+      logout, deleteAccount,
+    }}>
       {children}
     </AuthContext.Provider>
   );

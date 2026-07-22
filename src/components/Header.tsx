@@ -46,6 +46,9 @@ function SettingsIcon() {
 function DashboardIcon() {
   return <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><rect x="1" y="1" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.3"/><rect x="8" y="1" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.3"/><rect x="1" y="8" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.3"/><rect x="8" y="8" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.3"/></svg>;
 }
+function BillsIcon() {
+  return <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><rect x="2" y="1" width="10" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.3"/><path d="M4.5 4.5h5M4.5 7h5M4.5 9.5h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>;
+}
 function LogoutIcon() {
   return <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M5 2H2.5A1.5 1.5 0 0 0 1 3.5v7A1.5 1.5 0 0 0 2.5 12H5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/><path d="M9 4l3 3-3 3M12 7H5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 }
@@ -56,7 +59,7 @@ export default function Header() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
-  const { user, setUser, setAuthOpen } = useAuth();
+  const { user, setAuthOpen, logout } = useAuth();
 
   useEffect(() => {
     const stored = localStorage.getItem("theme") as "dark" | "light" | null;
@@ -91,8 +94,9 @@ export default function Header() {
     localStorage.setItem("theme", next);
   }
 
+  /** POST /auth/logout — revokes the refresh token, then clears local state. */
   function handleLogout() {
-    setUser(null);
+    void logout();
     setProfileOpen(false);
     setDrawerOpen(false);
   }
@@ -102,6 +106,7 @@ export default function Header() {
   const PROFILE_LINKS = [
     { icon: <DashboardIcon />, label: "Dashboard",    href: "/dashboard" },
     { icon: <HistoryIcon />,   label: "History", href: "/history" },
+    { icon: <BillsIcon />,     label: "Pay Bills",     href: "/bills" },
     { icon: <ProfileIcon />,   label: "Profile",       href: "/profile" },
     { icon: <SettingsIcon />,  label: "Settings",      href: "/settings" },
   ];

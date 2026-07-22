@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/AuthContext";
+import { useUsdNgnRate } from "@/hooks/useApi";
+import { api } from "@/lib/api";
+import type { RampNetwork } from "@/lib/api/types";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 type Token      = "USDT" | "USDC" | "CELO" | "SOL" | "XLM";
@@ -72,11 +75,25 @@ const WALLET_PATTERNS: Record<string, RegExp> = {
   "Stellar": /^G[A-Z2-7]{55}$/,
 };
 
+/** Fallback shown for corridors AutoRamp doesn't serve yet (GHS / KES). */
 const BANK_DETAILS: Record<FiatCode, { bank: string; account: string; name: string }> = {
   NGN: { bank: "Providus Bank",  account: "1234567890", name: "RAMPIT ESCROW LTD" },
   GHS: { bank: "Ecobank Ghana",  account: "0012345678", name: "RAMPIT ESCROW LTD" },
   KES: { bank: "Equity Bank KE", account: "0098765432", name: "RAMPIT ESCROW LTD" },
 };
+
+/**
+ * UI network → AutoRamp settlement network. Only NGN on these chains can be
+ * fulfilled by POST /autoramp/ramp/onramp; anything else falls back to the
+ * legacy escrow flow.
+ */
+const RAMP_NETWORKS: Record<string, RampNetwork> = {
+  "ERC-20": "base",
+  "BEP-20": "bsc",
+};
+
+/** The live deposit account returned by an on-ramp we just created. */
+type DepositAccount = { bank: string; account: string; name: string };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function formatFiat(val: string): string {
@@ -86,9 +103,9 @@ function formatFiat(val: string): string {
 function formatTime(s: number): string {
   return `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
 }
-function calcCrypto(rawFiat: number, fiat: FiatCode, token: Token, fee: number): string {
+function calcCrypto(rawFiat: number, fiat: FiatCode, token: Token, fee: number, usdRate: number): string {
   if (rawFiat < MIN_ORDER_FIAT[fiat]) return "—";
-  const usd = (rawFiat - fee) / USD_RATES[fiat];
+  const usd = (rawFiat - fee) / usdRate;
   return (usd / TOKEN_USD_PRICE[token]).toFixed(["SOL", "CELO"].includes(token) ? 4 : 2);
 }
 
@@ -154,15 +171,15 @@ function CopyButton({ text }: { text: string }) {
 // ── Bank Details Modal ───────────────────────────────────────────────────────
 function BankModal({
   open, bankReady, fiat, raw, cryptoAmt, token, wallet, network, memo, timeLeft, expired,
-  onSent, onClose,
+  bankDetails, reference, error, onSent, onClose,
 }: {
   open: boolean; bankReady: boolean; fiat: FiatCode; raw: number; cryptoAmt: string;
   token: Token; wallet: string; network: string; memo: string; timeLeft: number; expired: boolean;
+  bankDetails: DepositAccount; reference: string | null; error: string;
   onSent: () => void; onClose: () => void;
 }) {
   if (!open) return null;
-  const fiatMeta    = FIAT_CURRENCIES.find((f) => f.code === fiat)!;
-  const bankDetails = BANK_DETAILS[fiat];
+  const fiatMeta = FIAT_CURRENCIES.find((f) => f.code === fiat)!;
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center px-0 sm:px-4"
@@ -215,8 +232,18 @@ function BankModal({
         </div>
 
         {/* Bank details card */}
-        <div className="mx-6 mb-5 rounded-2xl overflow-hidden" style={{ border: "1px solid var(--border)" }}>
-          {!bankReady ? (
+        <div className="mx-6 mb-5 rounded-2xl overflow-hidden" style={{ border: `1px solid ${error ? "rgba(239,68,68,0.35)" : "var(--border)"}` }}>
+          {error ? (
+            /* Never fall back to a placeholder account — the user would pay the wrong one. */
+            <div className="p-5" style={{ background: "rgba(239,68,68,0.06)" }} role="alert">
+              <p style={{ fontFamily: "var(--font-body)", fontSize: "13px", fontWeight: 700, color: "var(--error)", marginBottom: "4px" }}>
+                Couldn&apos;t create this order
+              </p>
+              <p style={{ fontFamily: "var(--font-body)", fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                {error} — close this and try again. No payment details were issued, so please don&apos;t transfer anything yet.
+              </p>
+            </div>
+          ) : !bankReady ? (
             <div className="p-5 space-y-4" style={{ background: "var(--bg-tertiary)" }}>
               <Skeleton w="40%" h={12} />
               {[0,1,2].map(i => (
@@ -256,6 +283,17 @@ function BankModal({
                 <span style={{ fontFamily: "var(--font-body)", fontSize: "12px", color: "var(--text-tertiary)" }}>Account Name</span>
                 <span style={{ fontFamily: "var(--font-body)", fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>{bankDetails.name}</span>
               </div>
+
+              {/* Reference — present once a real on-ramp has been created */}
+              {reference && (
+                <div className="px-5 py-3 flex items-center justify-between gap-3" style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
+                  <span style={{ fontFamily: "var(--font-body)", fontSize: "12px", color: "var(--text-tertiary)" }}>Reference</span>
+                  <span className="flex items-center gap-2">
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }}>{reference}</span>
+                    <CopyButton text={reference} />
+                  </span>
+                </div>
+              )}
 
               {/* Countdown */}
               <div className="px-5 py-3 flex items-center justify-between" style={{ background: "var(--bg-secondary)" }}>
@@ -303,7 +341,7 @@ function BankModal({
 
         {/* CTA */}
         <div className="px-6 pb-6 space-y-3">
-          <button type="button" onClick={onSent} disabled={!bankReady || expired}
+          <button type="button" onClick={onSent} disabled={!bankReady || expired || !!error}
             className="btn-gold w-full rounded-2xl py-4 text-base font-bold flex items-center justify-center gap-2">
             I&apos;ve Sent the Payment →
           </button>
@@ -411,7 +449,8 @@ function ConfirmModal({
 
 // ── Main component ───────────────────────────────────────────────────────────
 export default function BuyForm() {
-  const { user, setUser, setAuthOpen, savedWallets, kycStatus, setKycOpen } = useAuth();
+  const { user, setAuthOpen, savedWallets, kycStatus, setKycOpen, refreshOrders } = useAuth();
+  const { data: liveRate } = useUsdNgnRate();
   const [step, setStep]           = useState<Step>(1);
   const [fiat, setFiat]           = useState<FiatCode>("NGN");
   const [fiatOpen, setFiatOpen]   = useState(false);
@@ -426,13 +465,19 @@ export default function BuyForm() {
   const [timeLeft, setTimeLeft]   = useState(COUNTDOWN_SECONDS);
   const [bankReady, setBankReady] = useState(false);
   const [modal, setModal]         = useState<ModalState>(null);
+  const [deposit, setDeposit]     = useState<DepositAccount | null>(null);
+  const [reference, setReference] = useState<string | null>(null);
+  const [rampError, setRampError] = useState("");
   const timerRef                  = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fiatMeta  = FIAT_CURRENCIES.find((f) => f.code === fiat)!;
   const fee       = NETWORK_FEE_FIAT[fiat];
   const minOrder  = MIN_ORDER_FIAT[fiat];
   const raw       = parseFloat(amount.replace(/,/g, "")) || 0;
-  const cryptoAmt = calcCrypto(raw, fiat, token, fee);
+  // Live USD/NGN from GET /autoramp/rates/usd-ngn; static table for other corridors.
+  const usdRate   = fiat === "NGN" && liveRate?.rate ? liveRate.rate : USD_RATES[fiat];
+  const cryptoAmt = calcCrypto(raw, fiat, token, fee, usdRate);
+  const rampNetwork = fiat === "NGN" ? RAMP_NETWORKS[network] : undefined;
 
   // Countdown — only when bank modal is open
   useEffect(() => {
@@ -441,12 +486,46 @@ export default function BuyForm() {
     return () => clearInterval(id);
   }, [modal]);
 
-  // Bank skeleton
+  /**
+   * Create the on-ramp as soon as the bank modal opens for a supported
+   * corridor — the deposit account we show comes back from the API. Anything
+   * else falls back to the static escrow account after a short skeleton.
+   */
   useEffect(() => {
     if (modal !== "bank") { setBankReady(false); return; }
-    const id = setTimeout(() => setBankReady(true), BANK_LOADING_MS);
-    return () => clearTimeout(id);
-  }, [modal]);
+
+    if (!rampNetwork) {
+      setDeposit(null);
+      setReference(null);
+      const id = setTimeout(() => setBankReady(true), BANK_LOADING_MS);
+      return () => clearTimeout(id);
+    }
+
+    let cancelled = false;
+    setRampError("");
+    api.autoramp
+      .onramp({ network: rampNetwork, amount: raw, destination: { address: wallet.trim() } })
+      .then((tx) => {
+        if (cancelled) return;
+        setReference(tx.reference);
+        if (tx.depositAccount) {
+          setDeposit({
+            bank: tx.depositAccount.bankName,
+            account: tx.depositAccount.accountNumber,
+            name: tx.depositAccount.accountName,
+          });
+        }
+        setBankReady(true);
+        void refreshOrders();
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setRampError(err instanceof Error ? err.message : "Could not start this order");
+        setBankReady(true);
+      });
+
+    return () => { cancelled = true; };
+  }, [modal, rampNetwork, raw, wallet, refreshOrders]);
 
   useEffect(() => { setNetwork(NETWORKS[token][0]); setWallet(""); setMemo(""); }, [token]);
   useEffect(() => { setAmount(""); setStep(1); }, [fiat]);
@@ -462,7 +541,7 @@ export default function BuyForm() {
   useEffect(() => {
     if (user && pendingBank.current) {
       pendingBank.current = false;
-      const usdAmount = raw / USD_RATES[fiat];
+      const usdAmount = raw / usdRate;
       if (kycStatus === "unverified" && usdAmount > 50) { setKycOpen(true); return; }
       setTimeLeft(COUNTDOWN_SECONDS);
       setModal("bank");
@@ -471,14 +550,41 @@ export default function BuyForm() {
 
   function openBankModal() {
     if (!user) { pendingBank.current = true; setAuthOpen(true); return; }
-    const usdAmount = raw / USD_RATES[fiat];
+    const usdAmount = raw / usdRate;
     if (kycStatus === "unverified" && usdAmount > 50) { setKycOpen(true); return; }
     setTimeLeft(COUNTDOWN_SECONDS);
     setModal("bank");
   }
 
+  /** Poll GET /autoramp/ramp/transactions until the on-ramp settles. */
+  async function waitForOnramp(ref: string) {
+    const deadline = Date.now() + 3 * 60_000;
+    while (Date.now() < deadline) {
+      const result = await api.autoramp.transactions({ reference: ref, limit: 1 });
+      const tx = [...(result.onramp ?? []), ...(result.offramp ?? [])][0];
+      if (tx?.status === "COMPLETED") return true;
+      if (tx?.status === "FAILED" || tx?.status === "CANCELLED") return false;
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    return false;
+  }
+
   async function handleSentPayment() {
     setModal("confirming");
+
+    // Real on-ramp: the backend tells us when the transfer lands.
+    if (reference) {
+      try {
+        const settled = await waitForOnramp(reference);
+        setModal(settled ? "success" : "failed");
+      } catch {
+        setModal("failed");
+      } finally {
+        void refreshOrders();
+      }
+      return;
+    }
+
     try {
       const chainMap: Record<string, string> = {
         "Stellar":      "stellar",
@@ -512,6 +618,9 @@ export default function BuyForm() {
     setMemo("");
     setTimeLeft(COUNTDOWN_SECONDS);
     setBankReady(false);
+    setDeposit(null);
+    setReference(null);
+    setRampError("");
   }
 
   const amountError = raw > 0 && raw < minOrder
@@ -534,6 +643,9 @@ export default function BuyForm() {
         bankReady={bankReady}
         fiat={fiat} raw={raw} cryptoAmt={cryptoAmt} token={token}
         wallet={wallet} network={network} memo={memo} timeLeft={timeLeft} expired={timeLeft === 0}
+        bankDetails={deposit ?? BANK_DETAILS[fiat]}
+        reference={reference}
+        error={rampError}
         onSent={handleSentPayment}
         onClose={handleModalClose}
       />
@@ -650,7 +762,7 @@ export default function BuyForm() {
             {raw >= minOrder && step === 1 && (
               <div className="rounded-xl px-4 py-3" style={{ background: "var(--accent-muted)", border: "1px solid var(--border-accent)", animation: "var(--animate-fade-in)" }}>
                 <div style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-secondary)" }}>
-                  Rate: <span style={{ color: "var(--text-primary)" }}>{fiatMeta.symbol}{USD_RATES[fiat].toLocaleString("en")} / USD</span>
+                  Rate: <span style={{ color: "var(--text-primary)" }}>{fiatMeta.symbol}{usdRate.toLocaleString("en", { maximumFractionDigits: 2 })} / USD</span>
                   <span style={{ margin: "0 8px", opacity: 0.3 }}>·</span>
                   Fee: <span style={{ color: "var(--text-primary)" }}>~{fiatMeta.symbol}{fee.toLocaleString("en")}</span>
                   <span style={{ margin: "0 8px", opacity: 0.3 }}>·</span>
